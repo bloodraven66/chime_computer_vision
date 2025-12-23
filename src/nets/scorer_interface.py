@@ -1,7 +1,7 @@
 """Scorer interface module."""
 
 import warnings
-from typing import Any, List, Tuple
+from typing import Any, List, Tuple, Optional
 
 import torch
 
@@ -24,7 +24,7 @@ class ScorerInterface:
 
     """
 
-    def init_state(self, x: torch.Tensor) -> Any:
+    def init_state(self, x: torch.Tensor, extra_scores: Optional[torch.Tensor] = None) -> Any:
         """Get an initial state for decoding (optional).
 
         Args:
@@ -83,7 +83,7 @@ class ScorerInterface:
 class BatchScorerInterface(ScorerInterface):
     """Batch scorer interface."""
 
-    def batch_init_state(self, x: torch.Tensor) -> Any:
+    def batch_init_state(self, x: torch.Tensor, extra_scores: Optional[torch.Tensor] = None) -> Any:
         """Get an initial state for decoding (optional).
 
         Args:
@@ -92,7 +92,12 @@ class BatchScorerInterface(ScorerInterface):
         Returns: initial state
 
         """
-        return self.init_state(x)
+        return self.init_state(x, extra_scores=extra_scores)
+
+        # Returns: initial state
+
+        # """
+        # return self.init_state(x)
 
     def batch_score(
         self, ys: torch.Tensor, states: List[Any], xs: torch.Tensor

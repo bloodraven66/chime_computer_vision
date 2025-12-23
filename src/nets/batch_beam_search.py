@@ -1,7 +1,7 @@
 """Parallel beam search module."""
 
 import logging
-from typing import Any, Dict, List, NamedTuple, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import torch
 
@@ -109,7 +109,7 @@ class BatchBeamSearch(BeamSearch):
         new_token_ids = top_ids % self.n_vocab
         return prev_hyp_ids, new_token_ids, prev_hyp_ids, new_token_ids
 
-    def init_hyp(self, x: torch.Tensor) -> BatchHypothesis:
+    def init_hyp(self, x: torch.Tensor, extra_scores: Optional[torch.Tensor] = None) -> BatchHypothesis:
         """Get an initial hypothesis data.
 
         Args:
@@ -122,7 +122,7 @@ class BatchBeamSearch(BeamSearch):
         init_states = dict()
         init_scores = dict()
         for k, d in self.scorers.items():
-            init_states[k] = d.batch_init_state(x)
+            init_states[k] = d.batch_init_state(x, extra_scores)
             init_scores[k] = 0.0
         return self.batchfy(
             [
@@ -155,6 +155,8 @@ class BatchBeamSearch(BeamSearch):
         scores = dict()
         states = dict()
         for k, d in self.full_scorers.items():
+
+            # exit()
             scores[k], states[k] = d.batch_score(hyp.yseq, hyp.states[k], x)
         return scores, states
 

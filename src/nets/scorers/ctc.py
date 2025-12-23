@@ -3,6 +3,8 @@
 import numpy as np
 import torch
 
+import logging
+
 from src.nets.ctc_prefix_score import CTCPrefixScore, CTCPrefixScoreTH
 from src.nets.scorer_interface import BatchPartialScorerInterface
 
@@ -84,7 +86,7 @@ class CTCPrefixScorer(BatchPartialScorerInterface):
         )
         return tscore, (presub_score, new_st)
 
-    def batch_init_state(self, x: torch.Tensor):
+    def batch_init_state(self, x: torch.Tensor, extra_scores=None):
         """Get an initial state for decoding.
 
         Args:
@@ -94,6 +96,20 @@ class CTCPrefixScorer(BatchPartialScorerInterface):
 
         """
         logp = self.ctc.log_softmax(x.unsqueeze(0))  # assuming batch_size = 1
+        
+        if extra_scores is not None:
+            # logging.debug(logp.shape)
+            # logging.debug(extra_scores.shape)
+            logging.debug("Applying extra scores to CTC log probabilities")
+            blank_idx = 0
+            extra_scores = torch.log(extra_scores.unsqueeze(0) + 1e-10).view(1, -1, 1)  # (1, T, 1)
+            non_blank_mask = torch.ones(logp.size(-1), dtype=torch.bool, device=logp.device)
+            non_blank_mask[blank_idx] = False
+            logp_modified = logp.clone()
+            logp_modified[:, :, non_blank_mask] = logp[:, :, non_blank_mask] + extra_scores
+            log_sum = torch.logsumexp(logp_modified, dim=-1, keepdim=True)
+            logp = logp_modified - log_sum
+
         xlen = torch.tensor([logp.size(1)])
         self.impl = CTCPrefixScoreTH(logp, xlen, 0, self.eos)
         return None

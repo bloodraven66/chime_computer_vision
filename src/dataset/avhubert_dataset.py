@@ -222,32 +222,165 @@ class AddMultiSpk(torch.nn.Module):
         return speech
 
 
-class VideoTransform:
-    def __init__(self, subset):
-        if subset == "train":
-            self.video_pipeline = torch.nn.Sequential(
-                FunctionalModule(lambda x: x / 255.0),
-                torchvision.transforms.RandomCrop(88),
-                # torchvision.transforms.Grayscale(),
-                AdaptiveTimeMask(10, 25),
-                torchvision.transforms.Normalize(0.421, 0.165),
-            )
-        elif subset == "val" or subset == "test":
-            self.video_pipeline = torch.nn.Sequential(
-                FunctionalModule(lambda x: x / 255.0),
-                torchvision.transforms.CenterCrop(88),
-                # torchvision.transforms.Grayscale(),
-                torchvision.transforms.Normalize(0.421, 0.165),
-            )
+# class VideoTransform:
+#     def __init__(self, subset):
+#         if subset == "train":
+#             self.video_pipeline = torch.nn.Sequential(
+#                 FunctionalModule(lambda x: x / 255.0),
+#                 torchvision.transforms.RandomCrop(88),
+#                 # torchvision.transforms.Grayscale(),
+#                 AdaptiveTimeMask(10, 25),
+#                 torchvision.transforms.Normalize(0.421, 0.165),
+#             )
+#         elif subset == "val" or subset == "test":
+#             self.video_pipeline = torch.nn.Sequential(
+#                 FunctionalModule(lambda x: x / 255.0),
+#                 torchvision.transforms.CenterCrop(88),
+#                 # torchvision.transforms.Grayscale(),
+#                 torchvision.transforms.Normalize(0.421, 0.165),
+#             )
 
-    def __call__(self, sample):
-        # sample: T x C x H x W
-        # rtype: T x 1 x H x W
-        return self.video_pipeline(sample)
+#     def __call__(self, sample):
+#         # sample: T x C x H x W
+#         # rtype: T x 1 x H x W
+#         return self.video_pipeline(sample)
+
+import torchvision.transforms as transforms
+import torch
+import random
+import numpy as np
+
+class VideoTransform:
+    def __init__(self, subset="train", augmentations=None, zero_video=False, template_video=False):
+        self.subset = subset
+        self.augment = augmentations is not None and (subset == "train")
+        
+        # Normalization (always applied)
+        self.normalize = transforms.Normalize(mean=[0.421], std=[0.165])
+        self.zero_video = zero_video
+        self.template_video = template_video
+        # Augmentation transforms
+        if self.augment:
+            self.augmentations = []
+            if "random_crop" in augmentations:
+                self.augmentations.append(self.random_crop)
+            if "horizontal_flip" in augmentations:
+                self.augmentations.append(self.horizontal_flip)
+            self.augmentations.append(self.temporal_mask)
+            if "color_jitter" in augmentations:
+                self.augmentations.append(self.color_jitter)
+            if "gaussian_noise" in augmentations:
+                self.augmentations.append(self.gaussian_noise)
+            print("Video augmentations:", [aug.__name__ for aug in self.augmentations])
+
+    def random_crop(self, video, crop_size=88):
+        """Random spatial crop from 96x96 to 88x88, then resize back to 96x96"""
+        T, C, H, W = video.shape
+        if H > crop_size and W > crop_size:
+            top = random.randint(0, H - crop_size)
+            left = random.randint(0, W - crop_size)
+            video = video[:, :, top:top+crop_size, left:left+crop_size]
+            # Resize back to 96x96
+            # video = torch.nn.functional.interpolate(
+            #     video.unsqueeze(0).unsqueeze(0), 
+            #     size=(96, 96), 
+            #     mode='bilinear', 
+            #     align_corners=False
+            # ).squeeze(0).squeeze(0)
+        return video
+    
+    def horizontal_flip(self, video, p=0.5):
+        """Horizontal flip with probability p"""
+        if random.random() < p:
+            video = torch.flip(video, dims=[2])  # Flip width dimension
+        return video
+    
+    def temporal_mask(self, video, max_frames=5, p=0.3):
+        """Randomly mask consecutive frames"""
+        if random.random() < p:
+            T = video.shape[0]
+            if T > max_frames:
+                num_frames = random.randint(1, max_frames)
+                start = random.randint(0, T - num_frames)
+                # Replace with mean frame or zeros
+                video[start:start+num_frames] = video.mean(dim=0, keepdim=True)
+        return video
+    
+    def color_jitter(self, video, brightness=0.2, contrast=0.2, p=0.5):
+        """Adjust brightness and contrast"""
+        if random.random() < p:
+            # Brightness
+            if random.random() < 0.5:
+                factor = 1 + random.uniform(-brightness, brightness)
+                video = video * factor
+            # Contrast
+            if random.random() < 0.5:
+                mean = video.mean()
+                factor = 1 + random.uniform(-contrast, contrast)
+                video = (video - mean) * factor + mean
+            video = torch.clamp(video, 0, 1)
+        return video
+    
+    def gaussian_noise(self, video, std=0.01, p=0.3):
+        """Add Gaussian noise"""
+        if random.random() < p:
+            noise = torch.randn_like(video) * std
+            video = video + noise
+            video = torch.clamp(video, 0, 1)
+        return video
+    
+    def mixup_frames(self, video, alpha=0.2, p=0.3):
+        """Mixup between consecutive frames"""
+        if random.random() < p:
+            T = video.shape[0]
+            if T > 1:
+                lam = np.random.beta(alpha, alpha)
+                # Mix current frame with next frame
+                for t in range(T-1):
+                    if random.random() < 0.5:
+                        video[t] = lam * video[t] + (1 - lam) * video[t+1]
+        return video
+    
+    def __call__(self, video_data):
+        """
+        Args:
+            video_data: torch tensor of shape (T, H, W) or (T, H, W, C)
+        Returns:
+            torch tensor of shape (T, H, W)
+        """
+        # Convert to tensor
+        video = video_data
+        if self.zero_video:
+            video = torch.zeros_like(video).float()
+            return video
+        if self.template_video:
+            first_frame = video[0:1]
+            video = first_frame.repeat(video.shape[0], 1, 1, 1).float()
+            return video
+        # video = torch.from_numpy(video_data).float()
+        # print(video.shape)
+        # Ensure correct shape
+        if video.ndim == 4:  # (T, H, W, C)
+            video = video.squeeze(-1)  # Remove channel if grayscale
+        
+        # Normalize to [0, 1] if needed
+        if video.max() > 1.0:
+            video = video / 255.0
+        
+        # Apply augmentations during training
+        if self.augment:
+            # Randomly apply augmentations
+            for aug_fn in self.augmentations:
+                video = aug_fn(video)
+        
+        # Normalize
+        video = self.normalize(video)
+        # print(video.shape)
+        return video
 
 
 class AudioTransform:
-    def __init__(self, subset, speech_dataset=None, snr_target=None):
+    def __init__(self, subset, speech_dataset=None, snr_target=None, zero_audio=False):
         if subset == "train":
             self.audio_pipeline = torch.nn.Sequential(
                 AdaptiveTimeMask(6400, 16000),
@@ -258,6 +391,7 @@ class AudioTransform:
                 #     lambda x: torch.nn.functional.layer_norm(x, x.shape, eps=1e-8)
                 # ),
             )
+
         elif subset == "val" or subset == "test":
             self.audio_pipeline = torch.nn.Sequential(
                 AddNoise(snr_target=snr_target)
@@ -268,11 +402,15 @@ class AudioTransform:
                 #     lambda x: torch.nn.functional.layer_norm(x, x.shape, eps=1e-8)
                 # ),
             )
-
+        self.zero_audio = zero_audio
+        
     def __call__(self, sample):
         # sample: T x 1
         # rtype: T x 1
-        return self.audio_pipeline(sample)
+        audio = self.audio_pipeline(sample)
+        if self.zero_audio:
+            audio = torch.zeros_like(audio)
+        return audio
 
 
 

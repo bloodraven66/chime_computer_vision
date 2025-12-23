@@ -328,7 +328,7 @@ class BeamSearch(torch.nn.Module):
         return best_hyps
 
     def forward(
-        self, x: torch.Tensor, maxlenratio: float = 0.0, minlenratio: float = 0.0
+        self, x: torch.Tensor, maxlenratio: float = 0.0, minlenratio: float = 0.0, diar_scores: torch.tensor = None
     ) -> List[Hypothesis]:
         """Perform beam search.
 
@@ -345,6 +345,7 @@ class BeamSearch(torch.nn.Module):
             list[Hypothesis]: N-best decoding results
 
         """
+        # print(diar_scores.shape, x.shape)
         # set length bounds
         if maxlenratio == 0:
             maxlen = x.shape[0]
@@ -356,9 +357,9 @@ class BeamSearch(torch.nn.Module):
         logging.debug("decoder input length: " + str(x.shape[0]))
         logging.debug("max output length: " + str(maxlen))
         logging.debug("min output length: " + str(minlen))
-
+       
         # main loop of prefix search
-        running_hyps = self.init_hyp(x)
+        running_hyps = self.init_hyp(x, extra_scores=diar_scores)
         ended_hyps = []
         for i in range(maxlen):
             logging.debug("position " + str(i))

@@ -8,15 +8,19 @@ import torch
 from transformers.utils import ModelOutput
 from typing import List, Optional, Union
 from dataclasses import dataclass
+import logging
 
-def get_beam_search_decoder(model, token_list, ctc_weight=0.1, beam_size=3):
+def get_beam_search_decoder(model, token_list, ctc_weight=0.1, beam_size=3, diar_weight=1.0):
     scorers = {
         "decoder": model.decoder,
         "ctc": CTCPrefixScorer(model.ctc, model.eos),
         "length_bonus": LengthBonus(len(token_list)),
         "lm": None
     }
-
+    logging.info(f"Using CTC weight: {ctc_weight}")
+    logging.info(f"Using Diarization weight: {diar_weight}")
+    print(f"Using CTC weight: {ctc_weight}")
+    print(f"Using Diarization weight: {diar_weight}")
     weights = {
         "decoder": 1.0 - ctc_weight,
         "ctc": ctc_weight,

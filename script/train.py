@@ -16,10 +16,15 @@ import datasets
 import time
 import argparse
 
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["HF_DATASETS_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 os.environ["HF_HUB_ETAG_TIMEOUT"] = "600"  # seconds
 os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "600"
 os.environ['WANDB_PROJECT'] = 'mcorec'
-
+os.environ["HF_HOME"] = "/mnt/matylda4/udupa/huggingface"
+os.environ["HF_HUB_CACHE"] = "/mnt/matylda4/udupa/huggingface/hub"
 # NCCL_DEBUG=WARN OMP_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=4,5 torchrun --nproc_per_node 2 script/train.py \
 # --streaming_dataset \
 # --include_mcorec \
@@ -53,28 +58,46 @@ def load_avsr_dataset(cache_dir='data-bin/cache', include_mcorec=True, streaming
     max_try_times = 5
 
     while not finished_loading:
-        try:
+        # try:
             # Load dataset. It's quite bigdataset and sometime downloading can break. You can simple retry.
-            lrs2 = datasets.load_dataset("nguyenvulebinh/AVYT", "lrs2", streaming=streaming, cache_dir=cache_dir).remove_columns(['__key__', '__url__'])
-            vox2 = datasets.load_dataset("nguyenvulebinh/AVYT", "vox2", streaming=streaming, cache_dir=cache_dir).remove_columns(['__key__', '__url__'])
-            avyt = datasets.load_dataset("nguyenvulebinh/AVYT", "avyt", streaming=streaming, cache_dir=cache_dir).remove_columns(['__key__', '__url__'])
-            avyt_mix = datasets.load_dataset("nguyenvulebinh/AVYT", "avyt-mix", streaming=streaming, cache_dir=cache_dir).remove_columns(['__key__', '__url__'])
+            # lrs2 = datasets.load_dataset("nguyenvulebinh/AVYT", "lrs2", streaming=streaming, cache_dir=cache_dir).remove_columns(['__key__', '__url__'])
+            # vox2 = datasets.load_dataset("nguyenvulebinh/AVYT", "vox2", streaming=streaming, cache_dir=cache_dir).remove_columns(['__key__', '__url__'])
+            # avyt = datasets.load_dataset("nguyenvulebinh/AVYT", "avyt", streaming=streaming, cache_dir=cache_dir).remove_columns(['__key__', '__url__'])
+            # avyt_mix = datasets.load_dataset("nguyenvulebinh/AVYT", "avyt-mix", streaming=streaming, cache_dir=cache_dir).remove_columns(['__key__', '__url__'])
             # Load mcorec dataset. Ensure you have permission to use this dataset.
             if include_mcorec:
                 print("Loading MCoRec dataset")
-                mcorec_dataset = datasets.load_dataset("MCoRecChallenge/MCoRec", streaming=streaming, cache_dir=cache_dir).remove_columns(['__key__', '__url__'])
+                # path = "/mnt/matylda4/udupa/hugging-face/hub/datasets--MCoRecChallenge--MCoRec/snapshots/9b3225cb0b6373861d281a178b76c238856697b3/processed/"
+                # path = "data-bin/cache/MCoRecChallenge___m_co_rec/mcorec-processed/0.0.0/9b3225cb0b6373861d281a178b76c238856697b3"
+                # mcorec_dataset = load_from_disk(path)
+                print(cache_dir)
+                cache_path = "data-bin/cache/MCoRecChallenge___m_co_rec/mcorec-processed/0.0.0/9b3225cb0b6373861d281a178b76c238856697b3/"
+                mcorec_dataset = datasets.load_dataset(
+                "arrow", 
+                data_files={
+                    "train": os.path.join(cache_path, "m_co_rec-train-*.arrow"),
+                    "valid": os.path.join(cache_path, "m_co_rec-valid-*.arrow")
+                },
+                verification_mode="no_checks"
+            )
+                # mcorec_dataset = datasets.load_dataset("MCoRecChallenge/MCoRec", streaming=streaming, cache_dir=cache_dir).remove_columns(['__key__', '__url__'])
+            # mcorec_dataset.save_to_disk(saved_dataset_path)
+            # print(f"Dataset saved to {saved_dataset_path}")
+    
+            
             finished_loading = True
-        except Exception as e:
-            try_times += 1
-            if try_times >= max_try_times:
-                raise e
-            time.sleep(10)
+        # except Exception as e:
+        #     try_times += 1
+        #     if try_times >= max_try_times:
+        #         raise e
+        #     time.sleep(10)
     
     if not streaming:
         # That mean above datasets are already downloaded and cached
-        list_datasets = [lrs2, vox2, avyt, avyt_mix]
+        # list_datasets = [lrs2, vox2, avyt, avyt_mix]
         if include_mcorec:
-            list_datasets.append(mcorec_dataset)
+            # list_datasets.append(mcorec_dataset)
+            list_datasets = [mcorec_dataset]
         for ds in list_datasets:
             for split in ds.keys():
                 split_size = len(ds[split])
@@ -84,76 +107,21 @@ def load_avsr_dataset(cache_dir='data-bin/cache', include_mcorec=True, streaming
                     num_shards = 1
                 ds[split] = ds[split].to_iterable_dataset(num_shards=num_shards)
                 print(f"Split {split} has {split_size} samples and {ds[split].num_shards} shards")
-
-    if include_mcorec:
-        map_dataset_probabilities = {
-            "lrs2": 0.25,
-            "vox2": 0.10,
-            "avyt": 0.20,
-            "avyt-mix": 0.25,
-            "mcorec": 0.2,
-        }
-    else:
-        map_dataset_probabilities = {
-            "lrs2": 0.3,
-            "vox2": 0.2,
-            "avyt": 0.25,
-            "avyt-mix": 0.25,
-        }
     
     map_datasets = {
-        "lrs2": {
-            "probabilities": map_dataset_probabilities["lrs2"],
-            "dataset": {
-                "train": datasets.concatenate_datasets([
-                    lrs2["train"], 
-                    lrs2["pretrain"]
-                ]),
-                "valid": datasets.concatenate_datasets([
-                    lrs2["valid"], 
-                    lrs2["test_snr_0_interferer_2"]
-                ]) if not include_mcorec else None
-            },
-        },
-        "vox2": {
-            "probabilities": map_dataset_probabilities["vox2"],
-            "dataset": {
-                "train": vox2["dev"],
-                "valid": None,
-            },
-        },
-        "avyt": {
-            "probabilities": map_dataset_probabilities["avyt"],
-            "dataset": {
-                "train": datasets.concatenate_datasets([
-                    avyt['talking'], 
-                    avyt['silent']
-                ]),
-                "valid": None,
-            },
-        },
-        "avyt-mix": {
-            "probabilities": map_dataset_probabilities["avyt-mix"],
-            "dataset": {
-                "train": avyt_mix["train"],
-                "valid": avyt_mix["test"] if not include_mcorec else None,
-            },
-        },
         "mcorec": {
-            "probabilities": map_dataset_probabilities["mcorec"] if include_mcorec else 0,
-            "dataset": {
-                "train": mcorec_dataset["train"] if include_mcorec else None,
-                "valid": mcorec_dataset["valid"] if include_mcorec else None,
-            },
-        }
+            "probabilities": 1.0,
+            "train": mcorec_dataset["train"] if include_mcorec else None,
+            "valid": mcorec_dataset["valid"] if include_mcorec else None,
+        },
     }
     print("map_datasets\n", map_datasets)
-    
-    train_dataset = datasets.interleave_datasets([item['dataset']['train'] for item in map_datasets.values() if item['dataset']['train'] is not None], 
+
+    train_dataset = datasets.interleave_datasets([item['train'] for item in map_datasets.values() if item['train'] is not None],
                                                  seed=11,
-                                                 probabilities=[item['probabilities'] for item in map_datasets.values() if item['dataset']['train'] is not None], 
+                                                 probabilities=[item['probabilities'] for item in map_datasets.values() if item['train'] is not None],
                                                  stopping_strategy='all_exhausted')
-    valid_dataset = datasets.interleave_datasets([item['dataset']['valid'] for item in map_datasets.values() if item['dataset']['valid'] is not None],
+    valid_dataset = datasets.interleave_datasets([item['valid'] for item in map_datasets.values() if item['valid'] is not None],
                                                  stopping_strategy='first_exhausted')
     
     train_dataset = train_dataset.map(format_sample)
@@ -161,9 +129,9 @@ def load_avsr_dataset(cache_dir='data-bin/cache', include_mcorec=True, streaming
     
     # load lrs2 for interference speech
     # interference_speech = None
-    print("Loading interference speech dataset. Actual file around 10GB need to download. This may take a while...")
-    interference_speech = datasets.load_dataset("nguyenvulebinh/AVYT", "lrs2", cache_dir=cache_dir, data_files='lrs2/lrs2-train-*.tar').remove_columns(['__key__', '__url__'])['train']
-    return train_dataset, valid_dataset, interference_speech
+    # print("Loading interference speech dataset. Actual file around 10GB need to download. This may take a while...")
+    # interference_speech = datasets.load_dataset("nguyenvulebinh/AVYT", "lrs2", cache_dir=cache_dir, data_files='lrs2/lrs2-train-*.tar').remove_columns(['__key__', '__url__'])['train']
+    return train_dataset, valid_dataset, None
 
 
 if __name__ == "__main__":
@@ -172,11 +140,11 @@ if __name__ == "__main__":
 
     parser.add_argument("--streaming_dataset", action="store_true", default=False)
     parser.add_argument("--include_mcorec", action="store_true", default=False)
-    parser.add_argument("--batch_size", type=int, default=6)
+    parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--max_steps", type=int, default=400000)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=2)
-    parser.add_argument("--save_steps", type=int, default=2000)
-    parser.add_argument("--eval_steps", type=int, default=2000)
+    parser.add_argument("--save_steps", type=int, default=100)
+    parser.add_argument("--eval_steps", type=int, default=100)
     parser.add_argument("--log_interval", type=int, default=25)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--warmup_steps", type=int, default=4000)
@@ -188,8 +156,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    streaming_dataset = True if args.streaming_dataset else False
-    include_mcorec = True if args.include_mcorec else False
+    # streaming_dataset = True if args.streaming_dataset else False
+    streaming_dataset = False
+    include_mcorec = True #if args.include_mcorec else False
     batch_size = args.batch_size
     max_steps = args.max_steps
     gradient_accumulation_steps = args.gradient_accumulation_steps
@@ -198,12 +167,41 @@ if __name__ == "__main__":
     log_interval = args.log_interval
     learning_rate = args.learning_rate
     warmup_steps = args.warmup_steps
-    resume_from_checkpoint = True if args.resume_from_checkpoint else False
+    # resume_from_checkpoint = True if args.resume_from_checkpoint else False
+    resume_from_checkpoint = False
     checkpoint_name = args.checkpoint_name
     model_name_or_path = args.model_name_or_path # Or None to train from scratch
     output_dir = os.path.join(args.output_dir, checkpoint_name)
     report_to = args.report_to
     
+    augment_video = False
+    zero_audio = False
+    zero_video = False
+    template_video = True
+
+    if augment_video:
+        # augmentations = ["random_crop", "horizontal_flip", "color_jitter", "random_gray"]
+        # augmentations = ["random_crop", "random_gray"]
+        # augmentations = ["random_crop", "horizontal_flip"]
+        augmentations = ["random_crop", "color_jitter"]
+        augmentations_id = "_".join([aug.split('_')[0][0] + aug.split('_')[1][0] for aug in augmentations])
+        checkpoint_name += f"_vidaug_{{{augmentations_id}}}"
+        print("Video augmentations enabled:", augmentations)
+        print("Checkpoint name updated to:", checkpoint_name)
+    
+    if zero_audio:
+        checkpoint_name += "_zeroaudio"
+        print("Zero audio enabled")
+    if zero_video:
+        checkpoint_name += "_zerovideo"
+        print("Zero video enabled")
+    if template_video:
+        checkpoint_name += "_templatevideo"
+        print("Template video enabled")
+    
+    args.checkpoint_name = checkpoint_name
+    output_dir = os.path.join(args.output_dir, checkpoint_name)
+
     # Create output directory if it doesn't exist
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
@@ -237,17 +235,17 @@ if __name__ == "__main__":
         avsr_model.avsr.encoder.load_state_dict(encoder_pretrained.state_dict())
     
     # Load dataset
-    train_dataset, valid_dataset, interference_dataset = load_avsr_dataset(streaming=streaming_dataset, include_mcorec=include_mcorec)
+    train_dataset, valid_dataset, _ = load_avsr_dataset(streaming=streaming_dataset, include_mcorec=include_mcorec)
         
     train_av_data_collator = DataCollator(
         text_transform=text_transform,
-        audio_transform=AudioTransform(subset="train", speech_dataset=interference_dataset),
-        video_transform=VideoTransform(subset="train"),
+        audio_transform=AudioTransform(subset="train", speech_dataset=None, zero_audio=zero_audio),
+        video_transform=VideoTransform(subset="train", augmentations=augmentations if augment_video else None, zero_video=zero_video, template_video=template_video),
     )
     valid_av_data_collator = DataCollator(
         text_transform=text_transform,
-        audio_transform=AudioTransform(subset="test"),
-        video_transform=VideoTransform(subset="test"),
+        audio_transform=AudioTransform(subset="test", zero_audio=zero_audio),
+        video_transform=VideoTransform(subset="test", zero_video=zero_video, template_video=template_video),
     )
     
     
@@ -305,7 +303,12 @@ if __name__ == "__main__":
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=valid_dataset,
+        max_eval_samples=10,
+        print_predictions=True,
     )
+
+    eval_results = trainer.evaluate()
+    print(f"Initial evaluation results: {eval_results}")
 
     if not resume_from_checkpoint:
         trainer.train()

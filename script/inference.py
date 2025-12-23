@@ -6,9 +6,18 @@ import math
 import glob
 from abc import ABC, abstractmethod
 from tqdm import tqdm
+import inspect
 import torch
 import torchvision
 import torchaudio
+import numpy as np
+
+import logging
+
+# logging.basicConfig(
+#     level=logging.DEBUG,
+#     format='%(asctime)s [%(levelname)s] %(filename)s:%(funcName)s: %(message)s'
+# )
 
 # Add src to path
 os.sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__))))
@@ -26,7 +35,7 @@ from src.cluster.conv_spks import (
 class BaseInferenceModel(ABC):
     """Abstract base class for all inference models"""
     
-    def __init__(self, checkpoint_path=None, cache_dir=None, beam_size=3):
+    def __init__(self, checkpoint_path=None, cache_dir=None, beam_size=3, ctc_weight=0.1, diar_weight=1.0):
         self.model = None
         self.text_transform = None
         self.av_data_collator = None
@@ -35,6 +44,9 @@ class BaseInferenceModel(ABC):
         self.checkpoint_path = checkpoint_path
         self.cache_dir = cache_dir or "./model-bin"
         self.beam_size = beam_size
+        self.ctc_weight = ctc_weight
+        self.diar_weight = diar_weight
+
         
     @abstractmethod
     def load_model(self):
@@ -69,9 +81,13 @@ class AVSRCocktailModel(BaseInferenceModel):
             dict_path=dict_path,
         )
         
+        zero_audio = True
+        zero_video = False
+        template_video = False
+
         # Load data collator
-        audio_transform = AudioTransform(subset="test")
-        video_transform = VideoTransform(subset="test")
+        audio_transform = AudioTransform(subset="test", zero_audio=zero_audio)
+        video_transform = VideoTransform(subset="test", zero_video=zero_video, template_video=template_video)
         
         self.av_data_collator = DataCollator(
             text_transform=self.text_transform,
@@ -83,9 +99,10 @@ class AVSRCocktailModel(BaseInferenceModel):
         model_path = self.checkpoint_path or "./model-bin/avsr_cocktail"
         print(f"Loading model from {model_path}")
         avsr_model = AVHubertAVSR.from_pretrained(model_path)
-        avsr_model.eval().cuda()
+        # avsr_model.eval().cuda()
+        avsr_model.eval().cuda().half()
         self.model = avsr_model.avsr
-        self.beam_search = get_beam_search_decoder(self.model, self.text_transform.token_list, beam_size=self.beam_size)
+        self.beam_search = get_beam_search_decoder(self.model, self.text_transform.token_list, beam_size=self.beam_size, ctc_weight=self.ctc_weight, diar_weight=self.diar_weight)
     
     def inference(self, videos, audios, **kwargs):
         avhubert_features = self.model.encoder(
@@ -93,12 +110,17 @@ class AVSRCocktailModel(BaseInferenceModel):
             video=videos,
         )
         audiovisual_feat = avhubert_features.last_hidden_state
+        # print(audiovisual_feat.shape, audios.shape, kwargs["post_scores"].shape)
         audiovisual_feat = audiovisual_feat.squeeze(0)
         
-        nbest_hyps = self.beam_search(audiovisual_feat)
+        nbest_hyps = self.beam_search(audiovisual_feat, diar_scores=kwargs.get("post_scores", None))
+
+        
         nbest_hyps = [h.asdict() for h in nbest_hyps[:min(len(nbest_hyps), 1)]]
         predicted_token_id = torch.tensor(list(map(int, nbest_hyps[0]["yseq"][1:])))
         predicted = self.text_transform.post_process(predicted_token_id).replace("<eos>", "")
+        # print("Predicted:", predicted)
+        # exit()
         return predicted
 
 
@@ -145,6 +167,9 @@ class AutoAVSRModel(BaseInferenceModel):
         audiovisual_feat = audiovisual_feat.squeeze(0)
 
         nbest_hyps = self.beam_search(audiovisual_feat)
+
+        # print(nbest_hyps)
+        # exit()
         nbest_hyps = [h.asdict() for h in nbest_hyps[:min(len(nbest_hyps), 1)]]
         predicted_token_id = torch.tensor(list(map(int, nbest_hyps[0]["yseq"][1:])))
         predicted = self.text_transform.post_process(predicted_token_id).replace("<eos>", "")
@@ -203,18 +228,24 @@ class MuAViCModel(BaseInferenceModel):
 class InferenceEngine:
     """Main inference engine that handles model selection and processing"""
     
-    def __init__(self, model_type: str, checkpoint_path=None, cache_dir=None, beam_size=3, max_length=15):
+    def __init__(self, model_type: str, checkpoint_path=None, cache_dir=None, beam_size=3, max_length=15, apply_postprocess=False, ctc_weight=0.1, diar_weight=1.0):
+        """
+        Initialize the inference engine.
+        """
+        self.diar_weight = diar_weight
         self.model_type = model_type
         self.checkpoint_path = checkpoint_path
         self.cache_dir = cache_dir
         self.beam_size = beam_size
         self.max_length = max_length
+        self.ctc_weight = ctc_weight
+        self.apply_postprocess = apply_postprocess
         self.model_impl = self._get_model_implementation()
         
     def _get_model_implementation(self) -> BaseInferenceModel:
         """Factory method to get the appropriate model implementation"""
         if self.model_type == "avsr_cocktail":
-            return AVSRCocktailModel(self.checkpoint_path, self.cache_dir, self.beam_size)
+            return AVSRCocktailModel(self.checkpoint_path, self.cache_dir, self.beam_size, self.ctc_weight, self.diar_weight)
         elif self.model_type == "auto_avsr":
             return AutoAVSRModel(self.checkpoint_path, self.cache_dir, self.beam_size)
         elif self.model_type == "muavic_en":
@@ -242,10 +273,23 @@ class InferenceEngine:
             segments_by_frames = segment_by_asd(asd, {
                 "max_chunk_size": max_length,  # in seconds
             })
-            # Normalize frame indices, for inference, don't care about the actual frame indices
-            segments = [((seg[0] - min_frame) / 25, (seg[-1] - min_frame) / 25) for seg in segments_by_frames]
+            
+            if self.apply_postprocess:
+                segment2score = []
+                import torch.nn.functional as F
+                def sigmoid(x):
+                    return 1 / (1 + np.exp(-x))
+                for seg in segments_by_frames:
 
-        else:
+                    seg_scores = [asd[str(f)] for f in seg]
+                    seg_scores = sigmoid(np.array(seg_scores)).tolist()
+                    segment2score.append(seg_scores)
+
+            # segments_ = [((seg[0]) / 25, (seg[-1]) / 25) for seg in segments_by_frames]
+            segments = [((seg[0] - min_frame) / 25, (seg[-1] - min_frame) / 25) for seg in segments_by_frames]
+            # for seg_idx in range(len(segments)):
+                # print(len(segments_by_frames[seg_idx]), len(segment2score[seg_idx]), (segments[seg_idx][1] - segments[seg_idx][0]) * 25, (segments_[seg_idx][1] - segments_[seg_idx][0]) * 25)
+        else:   
             # Get video duration
             audio, rate = torchaudio.load(video_path)
             video_duration = audio.shape[1] / rate
@@ -260,7 +304,8 @@ class InferenceEngine:
                 start_time = i / 100
                 end_time = min((i + step_size) / 100, video_duration)
                 segments.append((start_time, end_time))
-            
+        if self.apply_postprocess:
+            return segments, segment2score
         return segments
     
     def format_vtt_timestamp(self, timestamp):
@@ -274,23 +319,43 @@ class InferenceEngine:
     def infer_video(self, video_path, asd_path=None, offset=0., desc=None):
         """Perform inference on a video file"""
         segments = self.chunk_video(video_path, asd_path, max_length=self.max_length)
+        if self.apply_postprocess:
+            segments, segment2score = segments
         segment_output = []
         
         for seg in tqdm(segments, desc="Processing segments" if desc is None else desc, total=len(segments)):
             # Prepare sample
+            
             sample = {
                 "video": video_path,
                 "start_time": seg[0],
                 "end_time": seg[1],
             }
             sample_features = self.model_impl.av_data_collator([sample])
-            audios = sample_features["audios"].cuda()
-            videos = sample_features["videos"].cuda()
+            # audios = sample_features["audios"].cuda()
+            # videos = sample_features["videos"].cuda()
+            audios = sample_features["audios"].cuda().half()
+            videos = sample_features["videos"].cuda().half()
             audio_lengths = sample_features["audio_lengths"].cuda()
             video_lengths = sample_features["video_lengths"].cuda()
             
+            if self.apply_postprocess:
+                scores = segment2score.pop(0)
+                scores = torch.tensor(scores).unsqueeze(0).cuda()
+                scores = scores[:, :audios.shape[2]]  # Trim or pad to match audio length
+                if scores.shape[1] < audios.shape[2]:
+                    ##pad with last value
+                    pad_size = audios.shape[2] - scores.shape[1]
+                    pad_values = scores[:, -1].unsqueeze(1).repeat(1, pad_size)
+                    scores = torch.cat([scores, pad_values], dim=1)
+                    scores = scores * self.diar_weight
+                    # raise ValueError(f"Post-process scores length is shorter than audio length - scores: {scores.shape}, audios: {audios.shape}")
+            # print(audios.shape, videos.shape, scores.shape)
+            # exit()
+
             try:
-                output = self.model_impl.inference(videos, audios)
+                with torch.cuda.amp.autocast():
+                    output = self.model_impl.inference(videos, audios, post_scores=scores if self.apply_postprocess else None)
             except Exception as e:
                 print(f"Error during inference for segment {sample}")
                 raise e
@@ -328,11 +393,13 @@ class InferenceEngine:
             speaker_segments[speaker_name] = speaker_activity_segments
         
         scores = calculate_conversation_scores(speaker_segments)
+        # print(scores, speaker_segments)
+        # exit()
         clusters = cluster_speakers(scores, list(speaker_segments.keys()))   
         output_clusters_file = os.path.join(output_dir, "speaker_to_cluster.json")
         with open(output_clusters_file, "w") as f:
             json.dump(clusters, f, indent=4)    
-        
+    
         # Process speaker transcripts
         for speaker_name, speaker_data in tqdm(metadata.items(), desc="Processing speakers", total=len(metadata)):
             print()
@@ -400,14 +467,14 @@ def main():
     parser.add_argument(
         '--max_length',
         type=int,
-        default=15,
+        default=15, 
         help='Maximum length of video segments in seconds (default: 15)'
     )
     
     parser.add_argument(
         '--beam_size',
         type=int,
-        default=3,
+        default=1,
         help='Beam size for beam search decoding (default: 3)'
     )
     
@@ -423,17 +490,55 @@ def main():
         default='output',
         help='Name of the output directory within each session (default: output)'
     )
+    parser.add_argument(
+        '--apply_postprocess',
+        action='store_true',
+        help='Apply post-processing to the output (default: False)'
+    )
+    parser.add_argument(
+        '--apply_zero_audio',
+        action='store_true',
+        help='Apply zero audio to the output (default: False)'
+    )
+    parser.add_argument(
+        '--apply_zero_video',
+        action='store_true',
+        help='Apply zero video to the output (default: False)'
+    )
+    parser.add_argument(
+        '--apply_template_video',
+        action='store_true',
+        help='Apply template video to the output (default: False)'
+    )
+
+    parser.add_argument(
+        '--ctc_weight',
+        type=float,
+        default=1.0,
+        help='Weight for CTC loss (default: 0.1)'
+    )
+
+    parser.add_argument(
+        '--diar_weight',
+        type=float,
+        default=0.0,
+        help='Weight for diarization scores (default: 1.0)'
+    )
     
     args = parser.parse_args()
     
     # Initialize inference engine
-    engine = InferenceEngine(args.model_type, args.checkpoint_path, args.cache_dir, args.beam_size, args.max_length)
+    engine = InferenceEngine(args.model_type, args.checkpoint_path, args.cache_dir, args.beam_size, args.max_length, args.apply_postprocess, args.ctc_weight, args.diar_weight)
     engine.load_model()
     
     # Process session directories
+    print(f"DEBUG: session_dir = {args.session_dir!r}")
+
     if args.session_dir.strip().endswith("*"):
+        print("Multiple session directories detected using glob pattern.")
         all_session_dirs = glob.glob(args.session_dir)
     else:
+        print("Single session directory detected.")
         all_session_dirs = [args.session_dir]
     
     print(f"Inferring {len(all_session_dirs)} sessions using {args.model_type} model")
@@ -449,6 +554,8 @@ def main():
             print(f"  Model: {args.model_type}")
             print(f"  Input: {session_dir}")
             print(f"  Output: {output_dir}")
+            if args.apply_postprocess:
+                print("  Post-processing: Enabled")
         
         engine.mcorec_session_infer(session_dir, output_dir)
         
